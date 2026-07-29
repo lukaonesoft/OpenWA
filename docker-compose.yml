@@ -108,6 +108,10 @@ services:
       - XDG_CACHE_HOME=/tmp/.cache
       - PORT=2785
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - ENABLE_SWAGGER=${ENABLE_SWAGGER:-false}
+      - SERVE_DASHBOARD=${SERVE_DASHBOARD:-true}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - ENABLE_SWAGGER=${ENABLE_SWAGGER:-false}
       # Database. Forwarded blank by default (`${VAR:-}`) so a dashboard switch saved to
       # data/.env.generated actually applies at runtime — main.ts clears the blank (BLANK_SHADOWED_ENV_KEYS)
       # and the file wins. Set any of these in your .env/host to pin it (a real value keeps top precedence
