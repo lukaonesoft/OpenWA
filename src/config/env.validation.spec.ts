@@ -133,13 +133,21 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ QUEUE_ENABLED: '1' })).toThrow(/QUEUE_ENABLED/);
     expect(() => validateEnv({ MCP_ENABLED: 'yes' })).toThrow(/MCP_ENABLED/);
     expect(() => validateEnv({ SERVE_DASHBOARD: 'no' })).toThrow(/SERVE_DASHBOARD/);
+    expect(() => validateEnv({ STATUS_SEED_ON_READY: 'yes' })).toThrow(/STATUS_SEED_ON_READY/);
     // The raw value is checked, NOT a trimmed one: a trailing space / CR (Windows-edited env file
     // forwarded verbatim by `docker run --env-file`) must still be rejected — otherwise the flag reads
     // false at every `=== 'true'` site while validation passes, giving false assurance.
     expect(() => validateEnv({ QUEUE_ENABLED: 'true ' })).toThrow(/QUEUE_ENABLED/);
     expect(() => validateEnv({ MCP_ENABLED: 'true\r' })).toThrow(/MCP_ENABLED/);
     // Canonical values, unset, and blank (a compose `${KEY:-}` forward renders '') all pass.
-    expect(() => validateEnv({ QUEUE_ENABLED: 'true', MCP_ENABLED: 'false', SERVE_DASHBOARD: 'true' })).not.toThrow();
+    expect(() =>
+      validateEnv({
+        QUEUE_ENABLED: 'true',
+        MCP_ENABLED: 'false',
+        SERVE_DASHBOARD: 'true',
+        STATUS_SEED_ON_READY: 'false',
+      }),
+    ).not.toThrow();
     expect(() => validateEnv({ QUEUE_ENABLED: '', SERVE_DASHBOARD: '' })).not.toThrow();
     expect(() => validateEnv({})).not.toThrow();
   });
@@ -156,6 +164,40 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ REDIS_ENABLED: 'false' })).not.toThrow();
     expect(() => validateEnv({ REDIS_ENABLED: '' })).not.toThrow();
     expect(() => validateEnv({})).not.toThrow();
+  });
+
+  it.each(['MEDIA_CONVERSION_ENABLED', 'CHAT_MEDIA_ARCHIVE_ENABLED'])(
+    'rejects a %s typo instead of silently leaving the feature off',
+    key => {
+      // Both are read at boot with `=== 'true'`, so a typo silently disables the feature and the
+      // endpoints answer as if it was never configured — the same silent-off class as SEND_PACING.
+      expect(() => validateEnv({ [key]: 'ture' })).toThrow(new RegExp(key));
+      expect(() => validateEnv({ [key]: 'True' })).toThrow(new RegExp(key));
+      expect(() => validateEnv({ [key]: 'true' })).not.toThrow();
+      expect(() => validateEnv({ [key]: 'false' })).not.toThrow();
+      expect(() => validateEnv({ [key]: '' })).not.toThrow();
+    },
+  );
+
+  it('rejects a MEDIA_DOWNLOAD_ENABLED typo instead of silently keeping the expensive default on', () => {
+    // The odd one out of the boolean family: it is read with `!== 'false' && !== '0' && !== 'no'`
+    // (inbound-media-cap.ts), so a typo does not disable a feature — it leaves inbound media being
+    // decrypted and base64-inlined into every message row, up to MEDIA_DOWNLOAD_MAX_BYTES apiece.
+    // An operator who typed it to turn that OFF gets the most expensive behaviour the gateway has,
+    // with no diagnostics anywhere.
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: 'fasle' })).toThrow(/MEDIA_DOWNLOAD_ENABLED/);
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: 'ture' })).toThrow(/MEDIA_DOWNLOAD_ENABLED/);
+    // Unlike the strict family this flag is read through a NORMALISING parser — inbound-media-cap.ts
+    // trims and lowercases, and inbound-media-cap.spec.ts asserts 'FALSE' / ' false ' disable. Those
+    // spellings demonstrably work, so validation must not reject them; only a value the read site
+    // cannot recognise at all is a mistake worth failing the boot for.
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: 'False' })).not.toThrow();
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: ' false ' })).not.toThrow();
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: '0' })).not.toThrow();
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: 'no' })).not.toThrow();
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: 'true' })).not.toThrow();
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: 'false' })).not.toThrow();
+    expect(() => validateEnv({ MEDIA_DOWNLOAD_ENABLED: '' })).not.toThrow();
   });
 
   it('rejects a SEARCH_PROVIDER typo instead of silently falling back to auto', () => {
@@ -282,5 +324,40 @@ describe('validateEnv', () => {
     expect(() => validateEnv({ DATABASE_TYPE: 'sqlite', DATABASE_NAME: './data/openwa.sqlite' })).not.toThrow();
     // Unset falls through to the default path (configuration.ts) — the boot-loop fix.
     expect(() => validateEnv({ DATABASE_TYPE: 'sqlite' })).not.toThrow();
+  });
+
+  // A renewal that does not fit inside the lease renews too late to matter: the claim lapses between
+  // ticks and peers adopt sessions from a healthy node, with nothing in the logs saying why.
+  it('rejects a lease heartbeat that does not comfortably fit inside the TTL', () => {
+    expect(() => validateEnv({ SESSION_LEASE_TTL_MS: '60000', SESSION_LEASE_HEARTBEAT_MS: '50000' })).toThrow(
+      /less than half/,
+    );
+    // The defaults stand in for whatever is unset, so a lone oversized heartbeat cannot slip past.
+    expect(() => validateEnv({ SESSION_LEASE_HEARTBEAT_MS: '45000' })).toThrow(/less than half/);
+    expect(() => validateEnv({ SESSION_LEASE_TTL_MS: '20000' })).toThrow(/less than half/);
+    expect(() => validateEnv({ SESSION_LEASE_TTL_MS: '120000', SESSION_LEASE_HEARTBEAT_MS: '30000' })).not.toThrow();
+    // Exactly half is rejected too: a single missed renewal then lands on the expiry instant.
+    expect(() => validateEnv({ SESSION_LEASE_TTL_MS: '60000', SESSION_LEASE_HEARTBEAT_MS: '30000' })).toThrow(
+      /less than half/,
+    );
+    expect(() => validateEnv({})).not.toThrow();
+  });
+
+  // The forwarder builds an absolute URL from NODE_URL; a scheme-less value only fails at the first
+  // forward, as a 500 on a request that had nothing wrong with it.
+  it('rejects a NODE_URL that is not an absolute http(s) URL', () => {
+    expect(() => validateEnv({ NODE_URL: 'localhost:2785' })).toThrow(/absolute http/);
+    expect(() => validateEnv({ NODE_URL: '10.0.0.5:2785' })).toThrow(/absolute http/);
+    expect(() => validateEnv({ NODE_URL: 'ftp://10.0.0.5' })).toThrow(/absolute http/);
+    // Embedded credentials parse as a valid URL but undici's fetch refuses them, so reject at boot.
+    expect(() => validateEnv({ NODE_URL: 'http://user:pw@10.0.0.5:2785' })).toThrow(/must not embed credentials/);
+    expect(() => validateEnv({ NODE_URL: 'http://10.0.0.5:2785' })).not.toThrow();
+    expect(() => validateEnv({ NODE_URL: 'https://node-a.internal' })).not.toThrow();
+  });
+
+  it('rejects a non-positive media-conversion knob instead of silently using the default', () => {
+    expect(() => validateEnv({ MEDIA_CONVERSION_CONCURRENCY: '0' })).toThrow(/positive integer/);
+    expect(() => validateEnv({ MEDIA_CONVERSION_TIMEOUT_MS: 'abc' })).toThrow(/positive integer/);
+    expect(() => validateEnv({ MEDIA_CONVERSION_MAX_OUTPUT_BYTES: '52428800' })).not.toThrow();
   });
 });

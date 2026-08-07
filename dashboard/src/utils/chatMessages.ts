@@ -105,7 +105,21 @@ export const senderKey = (m: Pick<ChatMessage, 'author' | 'chatName'>): string |
 
 // ChatMessageView extends ChatMessage with the view-only fields the chat page renders.
 // Lifted from Chats.tsx so hooks/utils can share the same shape.
-type MessageMedia = { mimetype: string; filename?: string; data?: string; omitted?: boolean; sizeBytes?: number };
+export type MessageMedia = {
+  mimetype: string;
+  filename?: string;
+  data?: string;
+  omitted?: boolean;
+  sizeBytes?: number;
+};
+
+export const getMediaSrc = (media?: MessageMedia): string => {
+  if (!media || !media.data) return '';
+  if (media.data.startsWith('data:') || media.data.startsWith('http://') || media.data.startsWith('https://')) {
+    return media.data;
+  }
+  return `data:${media.mimetype};base64,${media.data}`;
+};
 
 export interface ChatMessageView extends ChatMessage {
   metadata?: {
@@ -132,6 +146,24 @@ export function mergeDeliveryStatus(
   if (!(incoming in DELIVERY_RANK)) return current; // unknown status — ignore
   if (!(current in DELIVERY_RANK)) return incoming;
   return DELIVERY_RANK[incoming] >= DELIVERY_RANK[current] ? incoming : current;
+}
+
+/**
+ * The reaction map to store after a `message.reaction` event.
+ *
+ * The gateway OMITS `reactions` when it holds no stored copy of the message to snapshot from — an
+ * ephemeral message, or one that predates the session going live. Absent means "unknown", so the map
+ * already on screen survives, including the optimistic reaction the local user just added under the
+ * `me` key. An empty object is a different claim: every reaction was withdrawn, and that must clear
+ * the badge. `??` draws that line where `||` would not, which is the whole reason this is a named
+ * function rather than an inline expression — the socket layer carries the absence through
+ * deliberately (useWebSocket.ts) and flattening it anywhere in between makes this dead code.
+ */
+export function mergeReactionSnapshot(
+  existing: Record<string, string> | undefined,
+  incoming: Record<string, string> | undefined,
+): Record<string, string> | undefined {
+  return incoming ?? existing;
 }
 
 /**

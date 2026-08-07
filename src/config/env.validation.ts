@@ -170,7 +170,9 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'WEBHOOK_DISPATCH_MAX_QUEUED',
     'STATS_CACHE_TTL_MS', // 0 = memo disabled
     'WEBHOOK_MAX_PER_SESSION', // 0 = unlimited
+    'AUTOMATION_MAX_PER_SESSION', // 0 = unlimited
     'WEBHOOK_MEDIA_INLINE_MAX_BYTES', // 0 = never inline media
+    'EXPORT_INLINE_MEDIA_BUDGET_BYTES', // 0 = a data export carries no inline media at all
   ]) {
     checkNonNegativeInt(key);
   }
@@ -206,8 +208,55 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'WEBHOOK_MAX_PAYLOAD_BYTES',
     // 0 would refuse every request carrying a body (a self-DoS), so the budget is positive-only.
     'INFLIGHT_BODY_BUDGET_BYTES',
+    // Media conversion: each is read with a `> 0` guard that silently falls back to the default,
+    // so a typo or a 0 quietly means "the default" instead of what the operator wrote.
+    'MEDIA_CONVERSION_TIMEOUT_MS',
+    'MEDIA_CONVERSION_MAX_OUTPUT_BYTES',
+    'MEDIA_CONVERSION_CONCURRENCY',
+    // Session ownership leases, same fall-back-silently reasoning.
+    'SESSION_LEASE_TTL_MS',
+    'SESSION_LEASE_HEARTBEAT_MS',
+    'SESSION_TAKEOVER_SWEEP_MS',
+    'SESSION_PROXY_TIMEOUT_MS',
   ]) {
     checkPositiveInt(key);
+  }
+
+  // A heartbeat that does not fit inside the lease renews too late to matter: the claim lapses
+  // between ticks, peers adopt sessions from a perfectly healthy node, and nothing in the logs says
+  // why. The defaults must be substituted for whatever is unset — validating only the key the
+  // operator happened to set would let a lone oversized heartbeat through.
+  const leaseTtlMs = Number(str('SESSION_LEASE_TTL_MS') ?? '60000');
+  const heartbeatMs = Number(str('SESSION_LEASE_HEARTBEAT_MS') ?? '20000');
+  // Strictly LESS than half: at exactly half, two renewals span the whole TTL, so a single missed
+  // renewal lands on the expiry instant — a tie that any scheduling jitter turns into a lapse. A
+  // margin below half is what lets one late or failed renewal still land inside the lease.
+  if (Number.isInteger(leaseTtlMs) && Number.isInteger(heartbeatMs) && heartbeatMs * 2 >= leaseTtlMs) {
+    errors.push(
+      `SESSION_LEASE_HEARTBEAT_MS (${heartbeatMs}) must be less than half of SESSION_LEASE_TTL_MS (${leaseTtlMs}) ` +
+        'so a renewal that is late or fails once still lands inside the lease',
+    );
+  }
+
+  // The forwarder builds an absolute URL from this; a value without a scheme parses as something
+  // unusable (`localhost:2785` reads as the scheme `localhost:`) and only fails at the first
+  // forward, as a 500 on a request that had nothing wrong with it. Embedded credentials
+  // (`http://user:pw@host`) parse fine here but undici's fetch rejects them outright — every
+  // forward would 503 permanently, with the credentials sitting in sessions.nodeUrl — so refuse
+  // those at boot too rather than let them reach the DB and the first forward.
+  const nodeUrl = str('NODE_URL');
+  if (nodeUrl) {
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(nodeUrl);
+    } catch {
+      parsed = undefined;
+    }
+    if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+      errors.push(`NODE_URL must be an absolute http(s) URL (got "${nodeUrl}")`);
+    } else if (parsed.username || parsed.password) {
+      errors.push('NODE_URL must not embed credentials — the forwarder cannot send a URL with a userinfo component');
+    }
   }
 
   // Boolean feature flags read at module-eval time (app.module.ts) with a bare `=== 'true'` /
@@ -233,6 +282,7 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     'MCP_ENABLED',
     'SERVE_DASHBOARD',
     'AUTO_START_SESSIONS',
+    'STATUS_SEED_ON_READY',
     'STORE_EPHEMERAL_MESSAGES',
     'RESOLVE_LID_TO_PHONE',
     'SIMULATE_TYPING',
@@ -240,8 +290,43 @@ export function validateEnv(config: EnvConfig): EnvConfig {
     // Read at boot by the throttler factory (app.module.ts) and CacheService with `=== 'true'`: a
     // typo like `ture` silently downgrades rate-limit storage + cache to per-process in-memory.
     'REDIS_ENABLED',
+    // Read by the SSRF guard's redirect loop with `=== 'true'`: a typo silently keeps the secure
+    // default, but an accidental 'true'-ish string is not the flag the operator meant to audit.
+    'PLUGIN_DOWNLOAD_ALLOW_INSECURE_REDIRECTS',
+    // Read with `=== 'true'`, so a typo leaves sends unpaced — the silent failure this whole
+    // feature exists to avoid, and invisible without this check.
+    'SEND_PACING_ENABLED',
+    // Opt-in feature flags read with `=== 'true'`: a typo silently leaves the feature OFF, so the
+    // conversion/archive endpoints answer as if nothing was configured. Same class as the above.
+    'MEDIA_CONVERSION_ENABLED',
+    'CHAT_MEDIA_ARCHIVE_ENABLED',
   ]) {
     checkBool(key);
+  }
+
+  // MEDIA_DOWNLOAD_ENABLED is the one boolean whose read site NORMALISES before comparing
+  // (`inbound-media-cap.ts` trims and lowercases, then treats 'false'/'0'/'no' as off), so the strict
+  // check above would reject spellings that demonstrably work — inbound-media-cap.spec.ts asserts
+  // 'FALSE' and ' false ' disable. What normalising cannot save it from is a MISSPELLING: every
+  // unrecognised value means ENABLED, so `fasle` leaves inbound media being decrypted and
+  // base64-inlined into every message row, up to MEDIA_DOWNLOAD_MAX_BYTES apiece — the most
+  // expensive behaviour the gateway has, chosen by an operator who asked for the opposite. So accept
+  // exactly the vocabulary the read site understands, and fail the boot on anything else.
+  const LENIENT_BOOL_VALUES = new Set(['true', '1', 'yes', 'false', '0', 'no']);
+  const lenientBoolKey = 'MEDIA_DOWNLOAD_ENABLED';
+  const lenientRaw = config[lenientBoolKey];
+  if (lenientRaw !== undefined) {
+    if (typeof lenientRaw !== 'string') {
+      errors.push(`${lenientBoolKey} must be one of true/false/1/0/yes/no`);
+    } else {
+      const normalized = lenientRaw.trim().toLowerCase();
+      if (normalized !== '' && !LENIENT_BOOL_VALUES.has(normalized)) {
+        errors.push(
+          `${lenientBoolKey} must be one of true/false/1/0/yes/no (got ${JSON.stringify(lenientRaw)}) — ` +
+            'an unrecognised value silently means ENABLED',
+        );
+      }
+    }
   }
 
   // SEARCH_PROVIDER enum: 'auto' selects the built-in DB full-text provider at runtime, 'builtin-fts'

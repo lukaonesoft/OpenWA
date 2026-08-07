@@ -25,14 +25,26 @@ describe('createSwaggerConfig', () => {
     expect(config.security).not.toContainEqual({ [METRICS_BEARER_SCHEME]: [] });
   });
 
-  it('declares a templated default server so published specs carry a base URL', () => {
+  // Swagger UI aims "Try it" at servers[0]. A relative URL resolves against whatever origin served
+  // the docs, so it works on localhost, a LAN address and behind a TLS proxy alike; anything
+  // absolute here would send the reader's browser somewhere else entirely (#1068).
+  it('lists a relative server FIRST so Try-it targets the origin serving the docs', () => {
     const config = createSwaggerConfig();
 
-    expect(config.servers).toHaveLength(1);
-    const [server] = config.servers ?? [];
-    expect(server.url).toBe('http://{host}:{port}');
-    expect(server.variables?.host.default).toBe('localhost');
-    expect(server.variables?.port.default).toBe('2785');
+    const [first] = config.servers ?? [];
+    expect(first.url).toBe('/');
+    expect(first.url.startsWith('http')).toBe(false);
+  });
+
+  it('keeps the templated absolute server so published specs still carry a concrete base URL', () => {
+    const config = createSwaggerConfig();
+
+    expect(config.servers).toHaveLength(2);
+    const templated = (config.servers ?? []).find(s => s.url.includes('{host}'));
+    expect(templated).toBeDefined();
+    expect(templated?.url).toBe('http://{host}:{port}');
+    expect(templated?.variables?.host.default).toBe('localhost');
+    expect(templated?.variables?.port.default).toBe('2785');
   });
 });
 
@@ -82,7 +94,7 @@ describe('exemptPublicOperations', () => {
 describe('PUBLIC_PATHS drift guard', () => {
   const EXPECTED_PUBLIC_CONTROLLERS = [
     'src/modules/health/health.controller.ts',
-    'src/modules/infra/infra.controller.ts',
+    'src/modules/infra/infra-status.controller.ts',
     'src/modules/integration/ingress.controller.ts',
     'src/modules/metrics/metrics.controller.ts',
   ];
@@ -99,8 +111,11 @@ describe('PUBLIC_PATHS drift guard', () => {
   it('every controller using @Public() is accounted for in EXPECTED_PUBLIC_CONTROLLERS', () => {
     const srcRoot = path.resolve(__dirname, '..').replace(/\\/g, '/');
     // Match only a line that is exactly `@Public()` — ignores the decorator's doc comment
-    // (`@example @Public()`) and test/string occurrences.
+    // (`@example @Public()`) and test/string occurrences. *.spec.ts files are excluded: a real
+    // @Public() decorator only attaches to a controller class, while a spec may legitimately spell
+    // the decorator out as a string fixture (e.g. the global-route-fence structural guard).
     const usingPublic = listTsFiles(srcRoot)
+      .filter(f => !f.endsWith('.spec.ts'))
       .filter(f => /^\s*@Public\(\)\s*$/m.test(fs.readFileSync(f, 'utf8')))
       .map(f => f.replace(/^.*\/src\//, 'src/'))
       .sort();

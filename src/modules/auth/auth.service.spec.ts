@@ -9,6 +9,7 @@ import { UnauthorizedException, NotFoundException, ConflictException } from '@ne
 import { createHash, createHmac } from 'crypto';
 import * as fs from 'fs';
 import { AuthService, resolveSeedApiKey, bannerKeyLine } from './auth.service';
+import { ApiKeyUsageTracker } from './api-key-usage-tracker.service';
 import { ApiKey, ApiKeyRole } from './entities/api-key.entity';
 
 // Helpers
@@ -104,6 +105,7 @@ describe('AuthService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
+        ApiKeyUsageTracker,
         {
           provide: getRepositoryToken(ApiKey, 'main'),
           useValue: repository,
@@ -577,6 +579,18 @@ describe('AuthService', () => {
       expect(result.id).toBe(key.id);
       expect(result.usageCount).toBe(1);
       expect(result.lastUsedAt).toBeDefined();
+    });
+
+    it('accepts a key padded with whitespace, as HTTP header parsing already does', async () => {
+      // A key pasted with a stray space authenticates over REST (header values are trimmed in
+      // transit) and must authenticate over the WebSocket handshake too, which carries the
+      // literal string from the CONNECT payload.
+      const rawKey = 'padded-key';
+      const key = createMockApiKey({ keyHash: hashKey(rawKey) });
+      (repository.findOne as jest.Mock).mockResolvedValue(key);
+      (repository.save as jest.Mock).mockImplementation(k => Promise.resolve(k));
+
+      await expect(service.validateApiKey(` ${rawKey}\n`)).resolves.toMatchObject({ id: key.id });
     });
 
     it('coalesces the usage-stat write within the throttle window', async () => {
