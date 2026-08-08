@@ -54,6 +54,20 @@ export {
 @Injectable()
 export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicationBootstrap {
   private readonly logger = createLogger('SessionService');
+  // whatsapp-web.js can only resolve the chat list as a full in-page scan (`Client.getChats()`), so
+  // repeated UI refreshes against `/sessions/:id/chats?limit=...` still make Puppeteer walk the whole
+  // list every time. A short per-session cache absorbs those bursts without changing the freshness
+  // model in a user-visible way.
+  private static readonly CHAT_LIST_CACHE_TTL_MS = 5_000;
+  private readonly chatListCache = new Map<
+    string,
+    {
+      engine: IWhatsAppEngine;
+      fetchedAt: number;
+      items: ChatSummary[];
+      inFlight?: Promise<ChatSummary[]>;
+    }
+  >();
 
   // Live engine instances, owned by the shared EngineRegistry (the narrow port feature modules
   // inject instead of this whole service). SessionEngineLifecycle is the only writer; the query
@@ -188,6 +202,7 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
     // Released only after the engines are actually down, so a peer never claims a session this
     // process is still holding open.
     await this.ownership?.releaseAll();
+    this.chatListCache.clear();
   }
 
   async create(dto: CreateSessionDto): Promise<Session> {
@@ -449,8 +464,56 @@ export class SessionService implements OnModuleDestroy, OnModuleInit, OnApplicat
 
     // Most-recent first, then bound the response window. Sorting before the cap means a capped
     // response is the N newest chats (what clients show first) rather than an arbitrary slice.
-    const chats = [...(await engine.getChats())].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    const chats = [...(await this.getCachedChats(id, engine))].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     return paginate(chats, opts.limit, opts.offset);
+  }
+
+  private async getCachedChats(id: string, engine: IWhatsAppEngine): Promise<ChatSummary[]> {
+    const now = Date.now();
+    const cached = this.chatListCache.get(id);
+
+    if (cached && cached.engine !== engine) {
+      this.chatListCache.delete(id);
+    } else if (cached?.items && now - cached.fetchedAt < SessionService.CHAT_LIST_CACHE_TTL_MS) {
+      return cached.items;
+    } else if (cached?.inFlight) {
+      return cached.inFlight;
+    }
+
+    const inFlight = engine
+      .getChats()
+      .then(items => {
+        this.chatListCache.set(id, {
+          engine,
+          fetchedAt: Date.now(),
+          items,
+        });
+        return items;
+      })
+      .catch(error => {
+        const current = this.chatListCache.get(id);
+        if (current?.engine === engine) {
+          if (current.items?.length) {
+            this.chatListCache.set(id, {
+              engine,
+              fetchedAt: current.fetchedAt,
+              items: current.items,
+            });
+          } else {
+            this.chatListCache.delete(id);
+          }
+        }
+        throw error;
+      });
+
+    this.chatListCache.set(id, {
+      engine,
+      fetchedAt: cached?.fetchedAt || 0,
+      items: cached?.items || [],
+      inFlight,
+    });
+
+    return inFlight;
   }
 
   /**

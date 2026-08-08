@@ -23,38 +23,43 @@ export class WwebjsChats {
 
   async getChats(): Promise<ChatSummary[]> {
     this.host.ensureReady();
-    const chats = await this.client().getChats();
-    const summaries: ChatSummary[] = [];
-    let skipped = 0;
+    try {
+      const chats = await this.client().getChats();
+      const summaries: ChatSummary[] = [];
+      let skipped = 0;
 
-    // Map the raw whatsapp-web.js chat objects to the library-agnostic ChatSummary
-    // shape so that no library types leak past the engine boundary. Some WA system
-    // or channel-like entries can lack the normal serialized id; skip those instead
-    // of failing the whole dashboard chats request.
-    for (const chat of chats) {
-      const id = chat.id?._serialized;
-      if (!id) {
-        skipped++;
-        continue;
+      // Map the raw whatsapp-web.js chat objects to the library-agnostic ChatSummary
+      // shape so that no library types leak past the engine boundary. Some WA system
+      // or channel-like entries can lack the normal serialized id; skip those instead
+      // of failing the whole dashboard chats request.
+      for (const chat of chats) {
+        const id = chat.id?._serialized;
+        if (!id) {
+          skipped++;
+          continue;
+        }
+
+        summaries.push({
+          id,
+          name: chat.name || id,
+          isGroup: Boolean(chat.isGroup),
+          kind: chatKind(id),
+          unreadCount: chat.unreadCount || 0,
+          timestamp: chat.timestamp || 0,
+          // A location message's body is the base64 map thumbnail; don't surface it as the chat preview.
+          lastMessage: chat.lastMessage?.type === MessageTypes.LOCATION ? '📍' : chat.lastMessage?.body || undefined,
+        });
       }
 
-      summaries.push({
-        id,
-        name: chat.name || id,
-        isGroup: Boolean(chat.isGroup),
-        kind: chatKind(id),
-        unreadCount: chat.unreadCount || 0,
-        timestamp: chat.timestamp || 0,
-        // A location message's body is the base64 map thumbnail; don't surface it as the chat preview.
-        lastMessage: chat.lastMessage?.type === MessageTypes.LOCATION ? '📍' : chat.lastMessage?.body || undefined,
-      });
-    }
+      if (skipped > 0) {
+        this.host.logger.warn(`Skipped ${skipped} chat(s) without a serialized id`);
+      }
 
-    if (skipped > 0) {
-      this.host.logger.warn(`Skipped ${skipped} chat(s) without a serialized id`);
+      return summaries;
+    } catch (error) {
+      this.host.reportIfPageTransportError(error, 'getChats');
+      throw error;
     }
-
-    return summaries;
   }
 
   async sendSeen(chatId: string): Promise<boolean> {
