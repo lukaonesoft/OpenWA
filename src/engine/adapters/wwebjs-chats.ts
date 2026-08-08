@@ -1,5 +1,6 @@
 import { MessageTypes, type Client } from 'whatsapp-web.js';
 import { ChatSummary, ChatState } from '../interfaces/whatsapp-engine.interface';
+import { EngineTransportError } from '../../common/errors/engine-transport.error';
 import { chatKind, isChannelJid } from '../identity/wa-id';
 import { WwebjsMessaging } from './wwebjs-messaging';
 import { type WwebjsEngineHost } from './wwebjs-host';
@@ -57,7 +58,10 @@ export class WwebjsChats {
 
       return summaries;
     } catch (error) {
-      this.host.reportIfPageTransportError(error, 'getChats');
+      if (this.host.isPageTransportError(error)) {
+        this.host.reportIfPageTransportError(error, 'getChats');
+        throw new EngineTransportError('Transport died while listing chats');
+      }
       throw error;
     }
   }
