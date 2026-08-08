@@ -55,15 +55,18 @@ const HAS_SYNCED_FIND = `            window
                     window.onAppStateHasSyncedEvent();
                 });`;
 
-const HAS_SYNCED_REPLACE = `            window
-                .require('WAWebSocketModel')
-                .Socket.on('change:hasSynced', () => {
+const HAS_SYNCED_REPLACE = `            const __openwaSocketModel =
+                typeof window.require === 'function' ? window.require('WAWebSocketModel') : null;
+            const __openwaSocket = __openwaSocketModel?.Socket;
+            if (__openwaSocket) {
+                __openwaSocket.on('change:hasSynced', () => {
                     window.onAppStateHasSyncedEvent();
                 });
-            // A warm profile can restore to hasSynced=true before this listener exists; the edge
-            // then never fires again. Fire once on the already-reached level as well.
-            if (window.require('WAWebSocketModel').Socket.hasSynced) {
-                window.onAppStateHasSyncedEvent();
+                // A warm profile can restore to hasSynced=true before this listener exists; the edge
+                // then never fires again. Fire once on the already-reached level as well.
+                if (__openwaSocket.hasSynced) {
+                    window.onAppStateHasSyncedEvent();
+                }
             }`;
 
 const EDITS = [

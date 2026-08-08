@@ -22,6 +22,9 @@ export class WwebjsChats {
     return this.host.getClient();
   }
 
+  private static readonly BRIDGE_RUNTIME_NOT_READY_PATTERN =
+    /window\.require is not a function|Cannot read properties of undefined \(reading 'getChats'\)/i;
+
   async getChats(): Promise<ChatSummary[]> {
     this.host.ensureReady();
     try {
@@ -58,6 +61,12 @@ export class WwebjsChats {
 
       return summaries;
     } catch (error) {
+      if (WwebjsChats.BRIDGE_RUNTIME_NOT_READY_PATTERN.test(error instanceof Error ? error.message : String(error))) {
+        this.host.logger.warn('WhatsApp Web runtime is not ready to list chats yet', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new EngineTransportError('WhatsApp Web runtime is not ready to list chats yet');
+      }
       if (this.host.isPageTransportError(error)) {
         this.host.reportIfPageTransportError(error, 'getChats');
         throw new EngineTransportError('Transport died while listing chats');
