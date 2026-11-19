@@ -98,6 +98,15 @@ describe('registerUnhandledRejectionHandler', () => {
     expect(String(warns[0][1]?.reason)).toContain('Execution context was destroyed');
   });
 
+  it('downgrades the Puppeteer target-closed rejection after teardown/reload to a warning too', () => {
+    const { handler, errors, warns } = register();
+    handler(new Error('TargetCloseError: Protocol error (Runtime.callFunctionOn): Target closed'));
+    expect(errors).toHaveLength(0);
+    expect(warns).toHaveLength(1);
+    expect(warns[0][0]).toMatch(/navigation or engine teardown/i);
+    expect(String(warns[0][1]?.reason)).toContain('Target closed');
+  });
+
   it('stringifies a non-Error rejection without throwing', () => {
     const { handler, errors } = register();
     expect(() => handler('a bare string')).not.toThrow();
