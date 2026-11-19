@@ -22,7 +22,8 @@ interface RejectionLogger extends FatalLogger {
  * module pulls whatsapp-web.js in eagerly, and this one is loaded during bootstrap, where the engine
  * must stay lazy. Keep the two in sync.
  */
-const PAGE_CONTEXT_LOST_REJECTION = /execution context was destroyed/i;
+const PAGE_CONTEXT_LOST_REJECTION =
+  /execution context was destroyed|targetcloseerror: protocol error \(runtime\.callfunctionon\): target closed|protocol error \(runtime\.callfunctionon\): target closed/i;
 
 /**
  * Register an `uncaughtExceptionMonitor` that routes an otherwise-fatal uncaught exception through the
